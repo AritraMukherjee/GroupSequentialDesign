@@ -1,0 +1,338 @@
+#Function for finding ESS_delay for equally spaced interims for uniform, linear(ESS_delay) and mixed(ESS_delay_mix) recruitment pattern
+#install.packages(gsDesign)
+#install.packages(mvtnorm)
+
+
+library(gsDesign)
+library(mvtnorm)
+
+
+
+ESS_delay=function(k,                   #number of stages
+                   test.type = 2,       #two-sided symmetric test
+                   alpha, beta,         #type I and II error
+                   delta=delta1,        #target treatment effect
+                   timing,              # interim spacing
+                   sfu="WT",            # spending function  "WT"-Wang-Tsiatis, "OF"=O'Brien Fleming, "Pocock"
+                   sfupar = Delta,      # shape parameter for stopping boundary
+                   recruitment,         # recruitment pattern
+                   t_total,             # total recruitment time
+                   m0)                  # delay length
+{
+  optimal=gsDesign(k,test.type = 2,alpha, beta, delta=delta1, timing, sfu="WT",sfupar = Delta)
+  
+  # Determining prob of terminating the trial at ith stage
+  J=k
+  e=optimal[["upper"]][["bound"]]                 
+  fu=optimal[["lower"]][["bound"]]
+  fu[J]=e[J]
+  n=optimal[["n.I"]]                             # vector of sample sizes at each stage for each arm
+  ESS_alt=2*optimal[["en"]][2]
+  ESS_null=2*optimal[["en"]][1]
+  n_single=2*optimal$n.fix
+  
+  # efficacy and futility boundaries
+  I = 1/(1/n + 1/n)
+  covariance <- function(I) 
+    {
+    J= length(I)
+    CovZ = diag(J) 
+    for (j1 in 2:J) {
+      CovZ[j1, 1:(j1 - 1)] <- CovZ[1:(j1 - 1), j1] <- sqrt(I[1:(j1 - 1)]/I[j1])
+    }
+    CovZ
+  }
+  CovZ=covariance(I)
+  
+  # computing stopping probabilities
+  
+  Stop_prob=function(tau,e,fu,J,CovZ)
+  {
+    E                <- Fu <- numeric(J)               # The probability to stop for efficacy/futility at each analysis
+    Fu[1]            <- pnorm(fu[1], tau*sqrt(I[1]))
+    E[1]             <- pnorm(e[1], tau*sqrt(I[1]), lower.tail = FALSE)
+    
+    if(J>=2){
+    for(i in 2:J)
+      {
+        E[i]=pmvnorm(c(fu[1:(i - 1)], e[i]), c(e[1:(i - 1)], Inf),
+                  tau*sqrt(I[1:i]), sigma = CovZ[1:i, 1:i])[1]
+        Fu[i]=pmvnorm(c(fu[1:(i - 1)], -Inf), c(e[1:(i - 1)], fu[i]),
+                  tau*sqrt(I[1:i]), sigma = CovZ[1:i, 1:i])[1]
+      }
+      Fu[is.nan(Fu)] <- 0 # Set any that are NaN to 0
+      E[is.nan(E)]   <- 0# Set any that are NaN to 0
+      Fu[J]          <- 1 - sum(E) - sum(Fu[-J]) 
+    }
+    cum_S          <- cumsum(S <- E + Fu) # S is the probability of stopping at each stage and cum_S is the cumulative stopping probability
+    return(cum_S)
+  }
+
+  cum_S_null= Stop_prob(0,e,fu,J,CovZ)
+  cum_S_alt= Stop_prob(delta1,e,fu,J,CovZ)
+
+  
+  # Computing number of overruns who are not contributing to the interim
+  n_overrun=numeric(J)
+  t=numeric(J)
+  
+  
+  # 1. Uniform
+  if(recruitment=="Uniform")
+  {
+    lamda=n[J]/t_total   #Maximum number of samples required/ total time of recruitment
+    n_overrun=c(rep(lamda*m0,J-1),0)
+  }
+  
+  
+  
+  # 2. Linear (Assuming a linear recruitment pattern of the form delta*t)
+  if(recruitment=="Linear")
+  {
+    delta=2*n[J]/(t_total*(t_total+1))
+    t[1]=(-1+sqrt(1+4*2*n[1]/delta))/2
+    n_overrun[1]=delta*m0*t[1]+delta*m0*(m0+1)/2
+    t[2]=(-(1+2*t[1])+sqrt((1+2*t[1])^2+4*2*(n[2]-n[1])/delta))/2
+    n_overrun[2]=delta*m0*t[1]+delta*m0*(m0+1)/2
+    if(J>2)
+    {
+      for(i in 2:(J-1))
+      {
+        t[i]=(-(1+2*t[i-1])+sqrt((1+2*t[i-1])^2+4*2*(n[i]-n[i-1])/delta))/2
+        n_overrun[i]=delta*m0*t[i]+delta*m0*(m0+1)/2
+      }
+    }
+    n_overrun[J]=0
+  }
+  
+  
+  for(i in 1:(J-1)).  # the number of overruns can not be more than the maximum sample size
+  {
+    if(n_overrun[i]>=(n[J]-n[i]))
+      n_overrun[i]=n[J]-n[i]
+    else
+      n_overrun[i]=n_overrun[i]
+  }
+  
+  
+  #computing ESS delay
+  #a=numeric(J-1)
+  #for(i in 1:J-1)
+  #  a[i]=cum_S[i]*n_overrun[i]
+  
+  ess_null_delay= ESS_null+sum(cum_S_null*n_overrun)
+  ess_alt_delay=ESS_alt+sum(cum_S_alt*n_overrun)
+  EL_null=(ess_null_delay-ESS_null)/(n_single-ESS_null)*100
+  EL_alt=(ess_alt_delay-ESS_alt)/(n_single-ESS_alt)*100
+  df <- c(J,t_total,m0,n_single,2*n[J],ESS_null,ess_null_delay, ESS_alt,ess_alt_delay,EL_null,EL_alt,n_overrun,e,fu)
+  names(df) <- c("Number of stages","Total recruitment period","Delay length","N_single","Maximum sample size","ESS_null","ESS_null_delay","ESS_alt","ESS_alt_delay","EL_null","EL_alt",paste("Number of overruns at stage", 1:J, sep = ""),paste("Efficacy ", 1:J, sep = ""),paste("Futility ", 1:J, sep = ""))
+  #return(list(2*n,n_overrun,df))
+  return(df)
+  
+}
+
+
+#============================================================================================================================================================================
+
+ESS_delay_mix=function(l,                   #number of stages
+                   test.type = 2,       #two-sided symmetric test
+                   alpha, beta,         #type I and II error
+                   delta=delta1,        #target treatment effect
+                   timing,              # interim spacing
+                   sfu="WT",            #spending function  "WT"-Wang-Tsiatis, "OF"=O'Brien Fleming, "Pocock"
+                   sfupar = Delta,      # shape parameter for stopping boundary
+                   k,                   # inflection point, ranges between 0 to 1.
+                   t_total,             # total recruitment time
+                   m0)                  # delay length
+{
+  optimal=gsDesign(l,test.type = 2,alpha, beta, delta=delta1, timing, sfu="WT",sfupar = Delta)
+  
+  # Determining prob of terminating the trial at ith stage
+  J=l
+  e=optimal[["upper"]][["bound"]]                 
+  fu=optimal[["lower"]][["bound"]]
+  fu[J]=e[J]
+  n=optimal[["n.I"]]                             # vector of sample sizes at each stage for each arm
+  ESS_alt=2*optimal[["en"]][2]
+  ESS_null=2*optimal[["en"]][1]
+  n_single=2*optimal$n.fix
+  
+  # efficacy and futility boundaries
+  I = 1/(1/n + 1/n)
+  covariance <- function(I) 
+  {
+    J= length(I)
+    CovZ = diag(J) # 1's on the diagonal, make it a J x J matrix
+    for (j1 in 2:J) {
+      # This is just Cov(Z_j1, Z_j2) = sqrt(I_j2 / I_j1) for j1 >= j2
+      CovZ[j1, 1:(j1 - 1)] <- CovZ[1:(j1 - 1), j1] <- sqrt(I[1:(j1 - 1)]/I[j1])
+    }
+    CovZ
+  }
+  CovZ=covariance(I)
+  
+  # computing stopping probabilities
+  
+  Stop_prob=function(tau,e,fu,J,CovZ)
+  {
+    E                <- Fu <- numeric(J)               # The probability to stop for efficacy/futility at each analysis
+    Fu[1]            <- pnorm(fu[1], tau*sqrt(I[1]))
+    E[1]             <- pnorm(e[1], tau*sqrt(I[1]), lower.tail = FALSE)
+    
+    if(J>=2){
+      for(i in 2:J)
+      {
+        E[i]=pmvnorm(c(fu[1:(i - 1)], e[i]), c(e[1:(i - 1)], Inf),
+                     tau*sqrt(I[1:i]), sigma = CovZ[1:i, 1:i])[1]
+        Fu[i]=pmvnorm(c(fu[1:(i - 1)], -Inf), c(e[1:(i - 1)], fu[i]),
+                      tau*sqrt(I[1:i]), sigma = CovZ[1:i, 1:i])[1]
+      }
+      Fu[is.nan(Fu)] <- 0 # Set any that are NaN to 0
+      E[is.nan(E)]   <- 0# Set any that are NaN to 0
+      Fu[J]          <- 1 - sum(E) - sum(Fu[-J]) # This is just ensuring sum(E) + sum(F) = 1
+    }
+    cum_S          <- cumsum(S <- E + Fu) # S is the probability of stopping at each stage and cum_S is the cumulative stopping probability
+    return(cum_S)
+  }
+  
+  cum_S_null= Stop_prob(0,e,fu,J,CovZ)
+  cum_S_alt= Stop_prob(delta1,e,fu,J,CovZ)
+  
+  
+  # Computing number of overruns who are not contributing to the interim
+    n_overrun=numeric(J)
+    t=numeric(J)
+    kt=floor(k*t_total)
+    
+    # mixed models
+    
+    #determining delta as δ(1+2+?+lt_max )+δlt_max (1-l) t_max=(δlt_max (lt_max+1))/2+δlt_max (1-l) t_max=n_max
+    delta=2*n[J]/(kt*(1+2*t_total-kt))
+    
+    # locating the "inflection" point
+    n_linear=delta*kt*(kt+1)/2
+    
+    
+    #finding overruns
+    if(n_linear<=n[1])
+    {
+      n_overrun=c(rep(delta*kt*m0,J-1),0)
+    }
+    
+    if(n[1]<n_linear && n[2]>=n_linear)
+    {
+      t[1]=-0.5+0.5*sqrt(1+8*n[1]/delta)
+      if((t[1]+m0)<kt)
+        n_overrun=c(delta*m0*t[1]+delta*m0*(m0+1)/2,rep(delta*kt*m0,J-2),0)
+      if((t[1]+m0)>=kt)
+        n_overrun=c(n_linear-n[1]+delta*kt*(t[1]+m0-kt),rep(delta*kt*m0,J-2),0)
+    }
+    
+    if(n[2]<n_linear && n[3]>=n_linear)
+    {
+      t[1]=-0.5+0.5*sqrt(1+8*n[1]/delta)
+      t[2]=(-(1+2*t[1])+sqrt((1+2*t[1])^2+4*2*n[1]/delta))/2
+      n_overrun[1]=delta*m0*t[1]+delta*m0*(m0+1)/2
+      if((t[2]+m0)<kt)
+        n_overrun[2]=delta*m0*t[2]+delta*m0*(m0+1)/2
+      if((t[2]+m0)>=kt)
+        n_overrun[2]=n_linear-n[2]+delta*kt*(t[2]+m0-kt)
+      n_overrun[3]=0
+    }
+    
+    if(J>3)
+    {
+      for(j in 2:(J-2))
+      {
+        t[1]=-0.5+0.5*sqrt(1+8*n[1]/delta)
+        if(n[j]<n_linear && n[j+1]>=n_linear)
+        {
+          for(i in 2:j)
+            t[i]=(-(1+2*t[i-1])+sqrt((1+2*t[i-1])^2+4*2*n[1]/delta))/2
+          for(i in 1:(j-1))
+            n_overrun[i]=delta*m0*t[i]+delta*m0*(m0+1)/2
+          if((t[j]+m0)<kt)
+            n_overrun[j]=delta*m0*t[j]+delta*m0*(m0+1)/2
+          if((t[j]+m0)>=kt)
+            n_overrun[j]=n_linear-n[j]+delta*kt*(t[j]+m0-kt)
+          for(i in (j+1):(J-1))
+            n_overrun[i]=delta*kt*m0
+          
+          n_overrun[J]=0
+        }
+      }
+      
+      if(n[J-1]<n_linear && n[J]>=n_linear)
+      {
+        t[1]=-0.5+0.5*sqrt(1+8*n[1]/delta)
+        for(i in 2:(J-1))
+          t[i]=(-(1+2*t[i-1])+sqrt((1+2*t[i-1])^2+4*2*n[1]/delta))/2
+        for(i in 1:(J-2))
+          n_overrun[i]=delta*m0*t[i]+delta*m0*(m0+1)/2
+        if((t[J-1]+m0)<kt)
+          n_overrun[J-1]=delta*m0*t[J-1]+delta*m0*(m0+1)/2
+        else
+          n_overrun[J-1]=n_linear-n[J-1]+delta*kt*(t[J-1]+m0-kt)
+        
+        n_overrun[J]=0
+      }
+    }
+    
+
+  
+  for(i in 1:(J-1))
+  {
+    if(n_overrun[i]>=(n[J]-n[i]))
+      n_overrun[i]=n[J]-n[i]
+  }
+  
+  
+  #computing ESS delay 
+  ess_null_delay= ESS_null+sum(cum_S_null*n_overrun)
+  ess_alt_delay=ESS_alt+sum(cum_S_alt*n_overrun)
+  EL_null=(ess_null_delay-ESS_null)/(n_single-ESS_null)*100
+  EL_alt=(ess_alt_delay-ESS_alt)/(n_single-ESS_alt)*100
+  df <- c(J,t_total,m0,k,n_single,2*n[J],ESS_null,ess_null_delay, ESS_alt,ess_alt_delay,EL_null,EL_alt,n_overrun,e,fu)
+  names(df) <- c("Number of stages","Total recruitment period","Delay length","k","N_single","Maximum sample size","ESS_null","ESS_null_delay","ESS_alt","ESS_alt_delay","EL_null","EL_alt",paste("Number of overruns at stage", 1:J, sep = ""),paste("Efficacy ", 1:J, sep = ""),paste("Futility ", 1:J, sep = ""))
+  return(df)
+  
+}
+
+
+##################### Example parameters for ESS_delay #######################################################
+
+k= 4                               # Number of stages
+delta1=0.5                         # target treatment effect
+Delta=0.25                         # WT shape parameter (0.5 for Pocock and 0 for OBF)
+alpha=0.025
+beta=0.1
+timing=c(1/4,2/4,3/4,1)
+recruitment= "Uniform"              # or "Linear"
+t_total=24                         # total recruitment length
+m0=6                               # delay length
+
+
+#gsDesign(k,test.type = 2,alpha, beta, delta=delta1, timing, sfu="WT",sfupar = Delta)
+
+ESS_delay(k,test.type = 2,alpha, beta, delta=delta1, timing, sfu="WT",sfupar = Delta,recruitment,t_total,m0)
+
+
+##################### Example parameters for ESS_delay_mix #######################################################
+
+l= 4                               # Number of stages
+delta1=0.5                         # target treatment effect
+Delta=0.25                         # shape parameter
+alpha=0.025
+beta=0.1
+timing=c(1/4,2/4,3/4,1)
+k= 0.5              
+t_total=24                         # total recruitment length
+m0=6                               # delay length
+
+
+#gsDesign(k,test.type = 2,alpha, beta, delta=delta1, timing, sfu="WT",sfupar = Delta)
+
+ESS_delay_mix(l,test.type = 2,alpha, beta, delta=delta1, timing, sfu="WT",sfupar = Delta,k,t_total,m0)
+
+
+  
