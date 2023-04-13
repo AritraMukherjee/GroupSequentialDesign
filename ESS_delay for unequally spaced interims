@@ -5,28 +5,37 @@
 library(gsDesign)
 library(mvtnorm)
 
-ESS_delay_unequal=function(k,            #number of stages
-                   test.type = 3,        #two-sided, asymmetric, beta-spending with binding lower bound
-                   alpha, beta,          #type I and II error
-                   delta=delta1,         #target treatment effect
-                   sflpar= gamma,        # parameter for error spending function
-                   sfupar= gamma,        # parameter for error spending function
-                   timing,               # interim spacing
-                   recruitment,          # recruitment pattern
-                   t_total,              # total recruitment time
-                   m0)                   # delay length
+ESS_delay_unequal=function(k,                    #number of stages
+                           test.type = 5,        #two-sided, asymmetric, lower bound spending under the
+                                                 #null hypothesis with binding lower bound
+                           alpha, beta,          #type I and II error
+                           delta=delta1,         #target treatment effect
+                           sflpar= gamma,        # parameter for error spending function
+                           sfupar= gamma,        # parameter for error spending function
+                           timing,               # interim spacing
+                           recruitment,          # recruitment pattern
+                           t_total,              # total recruitment time
+                           m0)                   # delay length
 {
-  optimal=gsDesign(k,test.type = 3,alpha, beta, delta=delta1, timing=timing, sflpar = gamma, sfupar=gamma)
-  
+  optimal=gsDesign(k,test.type = 5,
+                   n.fix = nNormal(delta1 = delta1, sd = 1, sd2 = 1, alpha , beta , ratio = 1),
+                   #alpha, beta, delta=theta, delta1=delta1, 
+                   timing=timing, 
+                   sflpar = gamma, 
+                   sfupar=gamma)
+ 
   # Determining design characteristics
-  J=k
-  e=optimal[["upper"]][["bound"]]                 
-  fu=optimal[["lower"]][["bound"]]
+  J=k                                               #No. of stages
+  e=optimal[["upper"]][["bound"]]                   #Efficacy boundaries             
+  fu=optimal[["lower"]][["bound"]]                  #Futility boundaries
   fu[J]=e[J]
-  n=optimal[["n.I"]]                             # vector of sample sizes at each stage for each arm
-  ESS_alt=2*optimal[["en"]][2]
-  ESS_null=2*optimal[["en"]][1]
-  n_single=2*optimal$n.fix
+  n=0.5*optimal[["n.I"]]                             # vector of sample sizes at each stage for each arm
+  ESS_alt=optimal[["en"]][2]                         # ESS under the alternative
+  ESS_null=optimal[["en"]][1]                        # ESS under the null
+  n_single=optimal$n.fix                             # Single stage sample size
+  
+  
+  # computing stopping probabilities
   
   I = 1/(1/n + 1/n)
   covariance <- function(I) 
@@ -41,7 +50,6 @@ ESS_delay_unequal=function(k,            #number of stages
   }
   CovZ=covariance(timing)
   
-  # computing stopping probabilities
   
   Stop_prob=function(tau,e,fu,J,CovZ)
   {
@@ -61,12 +69,13 @@ ESS_delay_unequal=function(k,            #number of stages
       E[is.nan(E)]   <- 0# Set any that are NaN to 0
       Fu[J]          <- 1 - sum(E) - sum(Fu[-J]) # This is just ensuring sum(E) + sum(F) = 1
     }
-    cum_S          <- cumsum(S <- E + Fu) # S is the probability of stopping at each stage and cum_S is the cumulative stopping probability
-    return(cum_S)
+    S <- E + Fu       #S is the probability of stopping at each stage
+    cum_S          <- cumsum(S <- E + Fu) #  cum_S is the cumulative stopping probability
+    return(S)
   }
   
-  cum_S_null= Stop_prob(0,e,fu,J,CovZ)
-  cum_S_alt= Stop_prob(delta1,e,fu,J,CovZ)
+  S_null= Stop_prob(0,e,fu,J,CovZ)
+  S_alt= Stop_prob(delta1,e,fu,J,CovZ)
   
   
   # Computing number of overruns who are not contributing to the interim
@@ -77,7 +86,7 @@ ESS_delay_unequal=function(k,            #number of stages
   # 1. Uniform
   if(recruitment=="Uniform")
   {
-    lamda=n[J]/t_total   #Maximum number of samples required/ total time of recruitment
+    lamda=2*n[J]/t_total   #Maximum number of samples required/ total time of recruitment
     n_overrun=c(rep(lamda*m0,J-1),0)
   }
   
@@ -86,18 +95,11 @@ ESS_delay_unequal=function(k,            #number of stages
   # 2. Linear (Assuming a linear recruitment pattern of the form delta*t)
   if(recruitment=="Linear")
   {
-    delta=2*n[J]/(t_total*(t_total+1))
-    t[1]=(-1+sqrt(1+4*2*n[1]/delta))/2
-    n_overrun[1]=delta*m0*t[1]+delta*m0*(m0+1)/2
-    t[2]=(-(1+2*t[1])+sqrt((1+2*t[1])^2+4*2*(n[2]-n[1])/delta))/2
-    n_overrun[2]=delta*m0*t[1]+delta*m0*(m0+1)/2
-    if(J>2)
+    delta=2*n[J]*2/(t_total*(t_total+1))
+    for(i in 1:(J-1))
     {
-      for(i in 2:(J-1))
-      {
-        t[i]=(-(1+2*t[i-1])+sqrt((1+2*t[i-1])^2+4*2*(n[i]-n[i-1])/delta))/2
-        n_overrun[i]=delta*m0*t[i]+delta*m0*(m0+1)/2
-      }
+      t[i]=(-1+sqrt(1+4*4*n[i]/delta))/2
+      n_overrun[i]=delta*m0*t[i]+delta*m0*(m0+1)/2 
     }
     n_overrun[J]=0
   }
@@ -105,13 +107,15 @@ ESS_delay_unequal=function(k,            #number of stages
   
   for(i in 1:(J-1))
   {
-    if(n_overrun[i]>=(n[J]-n[i]))
-      n_overrun[i]=n[J]-n[i]
+    if(n_overrun[i]>=2*(n[J]-n[i]))
+      n_overrun[i]=2*(n[J]-n[i])
+    else
+      n_overrun[i]=n_overrun[i]
   }
   
   
-  ess_null_delay= ESS_null+sum(cum_S_null*n_overrun)
-  ess_alt_delay=ESS_alt+sum(cum_S_alt*n_overrun)
+  ess_null_delay=sum(S_null*(2*n+n_overrun))
+  ess_alt_delay=sum(S_alt*(2*n+n_overrun))
   EL_null=(ess_null_delay-ESS_null)/(n_single-ESS_null)*100
   EL_alt=(ess_alt_delay-ESS_alt)/(n_single-ESS_alt)*100
   df <- c(J,t_total,m0,timing,n_single,2*n[J],ESS_null,ess_null_delay, ESS_alt,ess_alt_delay,EL_null,EL_alt,n_overrun,e,fu)
@@ -134,7 +138,5 @@ t_total=24                         # total recruitment length
 m0=6                               # delay length
 
 
-gsDesign(k,test.type = 3,alpha, beta, delta=delta1, timing=timing, sflpar = gamma,sfupar = gamma)
-
-ESS_delay_unequal(k,test.type = 3,alpha, beta, delta=delta1, timing=timing,sflpar = gamma,sfupar=gamma, recruitment,t_total,m0)
+ESS_delay_unequal(k,test.type = 5,alpha, beta, delta=delta1, timing=timing,sflpar = gamma,sfupar=gamma, recruitment,t_total,m0)
 
