@@ -1,0 +1,305 @@
+# Function to compute the ESS accounting for delay
+
+# Need to run the following code to obtain
+
+
+ESS_delay(Delta,         # Shape parameter of a Wang-Tsiatis stopping boundary lies between 0 to 1
+          rho,           # Interim spacing
+          sigma2,        # Variance in the control and treatment arm
+          ratio,         # proportion of sample size in treatment arm as compared to control arm
+          alpha,         # type I error rate
+          beta,          # type II error rate
+          delta1,        # Target treatment effect
+          recruitment,   # Recruitment pattern, Uniform or Linear
+          t_total,       # Total recruitment time
+          m0)            # Delay length
+
+
+
+# First need to obtain the group sequential design with given parameters
+#======================================================================================================================================================
+
+library(mvtnorm)
+
+
+
+# Function to compute the covariance matrix computed as Cov(Z_j1, Z_j2) = sqrt(I_j2 / I_j1) for j1 >= j2
+covariance    <- function(I) {
+  J                      <- length(I)                                           # No. of stages
+  CovZ                   <- diag(J)                                             # 1's on the diagonal, make it a J x J matrix
+  for (j1 in 2:J) 
+  {
+    CovZ[j1, 1:(j1 - 1)] <- CovZ[1:(j1 - 1), j1] <- sqrt(I[1:(j1 - 1)]/I[j1])
+  }
+  CovZ
+}
+
+#========================================================================================================================================================
+
+
+# Function to return the power, given tau (treatment effect), e and f (efficacy and futility bounds), I (the information levels), CovZ (the covariance matrix)
+power         <- function(tau, e, fu, I, CovZ) {
+  J     <- length(I) 
+  P     <- numeric(J)
+  # Compute P(Reject at analysis 1)
+  P[1]     <- pnorm(e[1], tau*sqrt(I[1]), lower.tail = FALSE)
+  # Compute P(Reject at analysis 2)
+  P[2]    <- pmvnorm(c(fu[1], e[2]), c(e[1], Inf), tau*sqrt(I[1:2]),
+                     sigma = CovZ[1:2, 1:2])[1]
+  if (!is.nan(P[2])) 
+    Pow   <- sum(P) 
+  if(J>2)
+  {
+    for(i in 3:J)
+    {
+      P[i]=pmvnorm(c(fu[1:(i-1)], e[i]), c(e[1:(i-1)], Inf),
+                   tau*sqrt(I[1:i]), sigma = CovZ[1:i, 1:i])[1]
+      if (!is.nan(P[i])) 
+        Pow <- sum(P)                                                           # the integral is very small and can return NaN values
+    }
+  }
+  if (is.nan(Pow)) 
+    0                                                                           # If it broke return 0
+  else
+    Pow                                                                         # Otherwise return P
+}
+
+#=============================================================================================================================================================
+
+# Our stopping boundaries are defined entirely in terms of a single unknown parameter C. This function takes a value of C and determines what the type I
+# error rate would then be. It subtracts this from the target alpha so that it can be used in root solving
+
+root_C        <- function(C,                                                    # Used in definition of stopping boundaries
+                          alpha,                                                # Target type I error rate
+                          CovZ,                                                 # Covariance matrix for test statistics
+                          rho,                                                  # Timing of interim analyses (as proportion of the way through the trial)
+                          Delta)                                                # Shape parameter in stopping boundaries
+{
+  J <- length(rho) 
+  e <- C*(rho)^(Delta - 0.5)                                                    # These are the general forms for Wang-Tsiatis efficacy/futility bounds
+  fu <-c(rep(0,length(rho)-1), C)                                               # The futility bounds are fixed at 0
+  #fu <- c(-e[-J], C)                                                           # When the bounds are symmetric
+  alpha - power(0,                                                              # Treatment effect is 0 as we want the type I error rate
+                e,
+                fu,
+                numeric(J),                                                
+                CovZ)
+}
+
+
+
+#==============================================================================================================================================================================
+# Takes a value for the final sample size in the control arm and computes what the power would be. Subtracts this from the target (1 - beta), to use in root solving
+
+
+root_n0J      <- function(n0J,                                                  # sample size in control arm at analysis J (final analysis)
+                          delta,                                                # Treatment effect we compute power at
+                          sigma2,                                               # Variance of the outcomes in the two arms
+                          ratio,                                                # Sample size ratio between control and experimental arms
+                          CovZ,                                                 # Covariance matrix for test statistics
+                          rho,                                                  # Timing of interim analyses (as proportion of the way through the trial)
+                          e,                                                    # Efficacy bounds
+                          fu,                                                   # Futility bounds
+                          beta)                                                 # Target type II error rate
+{
+  n0 <- n0J*rho                                                                 # vector of sample sizes in control arm at all analyses
+  (1 - beta) - power(delta,
+                     e,
+                     fu,
+                     1/(sigma2[1]/n0 + sigma2[2]/(n0*ratio)),
+                     CovZ)
+}
+
+#====================================================================================================================================================================
+
+# Given a group-sequential design, this computes its operating characteristics at a given treatment effect
+opchar_int    <- function(tau, e, fu, I, CovZ,
+                          n) 
+  { 
+  J                <- length(e) 
+  E                <- Fu <- numeric(J)                                          # The probability you stop for efficacy/futility at each analysis
+  Fu[1]            <- pnorm(fu[1], tau*sqrt(I[1]))
+  E[1]             <- pnorm(e[1], tau*sqrt(I[1]), lower.tail = FALSE)
+  
+  if (J >= 2)
+  {
+    for(i in 2:J)
+    {
+      E[i]           <-
+        pmvnorm(c(fu[1:(i - 1)], e[i]), c(e[1:(i - 1)], Inf),
+                tau*sqrt(I[1:i]), sigma = CovZ[1:i, 1:i])[1]
+      Fu[i]      <-
+        pmvnorm(c(fu[1:(i-1)], -Inf), c(e[1:(i-1)], fu[i]),
+                tau*sqrt(I[1:i]), sigma = CovZ[1:i, 1:i])[1]
+      
+    }
+    Fu[J]          <- 1 - sum(E) - sum(Fu[1:(J - 1)])                           
+    Fu[is.nan(Fu)] <- 0 
+    E[is.nan(E)]   <- 0
+  }
+  cum_S          <- cumsum(S <- E + Fu)                                         # S is the probability of stopping at each stage and cum_S is the cumulative stopping probability
+  MSS            <- ifelse(any(cum_S == 0.5),
+                           0.5*(n[which(cum_S == 0.5)] +
+                                  n[which(cum_S == 0.5) + 1]),
+                           n[which(cum_S > 0.5)[1]])
+
+  if (sum(n^2*S) - sum(n*S)^2 < 0) {
+    SDSS         <- 0
+  } else {
+    SDSS         <- sqrt(sum(n^2*S) - sum(n*S)^2)
+  }
+ 
+  ESS            <- sum(n*S)                                                    #Expected sample size   
+  opchar         <- c(tau, sum(E), ESS, SDSS, MSS, E, Fu, S, cum_S, n,e,fu)
+  names(opchar)  <- c("tau", "P(tau)", "ESS(tau)", "SDSS(tau)",
+                      "MSS(tau)", paste(rep(c("E", "F", "S"), each = J),
+                                        rep(1:J, 3), "(tau)", sep = ""),
+                      paste("cum{S", 1:J, "(tau)}", sep = ""),   
+                      paste("n", 1:J, "(tau)}", sep = ""),
+                      paste("e", 1:J, sep = ""),paste("fu", 1:J, sep = ""))
+  opchar
+}
+
+
+#==================================================================================================================================================================================
+
+
+# This is designed to take 'Delta' (shape parameter in stopping boundaries) and 'rho' (timing of interim analyses) as variables, compute what the
+# group-sequential design needs to be to control the type I and type II error rates, and then return the operating characteristics of this design
+
+
+opchar <- function(Delta, rho, sigma2, ratio, alpha, beta, delta) 
+  {
+  J            <- length(rho)
+  CovZ         <- covariance(rho)
+  # Search for the value of C that will control the type I error rate
+  C            <- uniroot(root_C, c(1e-6, 1e6), alpha = alpha,
+                          CovZ = CovZ, rho = rho, Delta = Delta)$root
+  # Set what the stopping boundaries are using the C we have found above
+  e            <- C*(rho)^(Delta - 0.5)
+  # fu           <- c(-e[-J],C)
+  fu           <- c(rep(0,length(rho)-1), C)
+  # Search for the value of sample size in the control arm at the final analysis
+  # to control the type II error rate
+  n0J          <- uniroot(f = root_n0J, interval = c(1e-6, 1e6), delta = delta,
+                          sigma2 = sigma2, ratio = ratio, CovZ = CovZ,
+                          rho = rho, e = e, fu = fu, beta = beta)$root
+  # Set the cumulative sample size in control arm across the analyses
+  n0           <- n0J*rho
+  # Now set it summed across both arms
+  n            <- n0*(1 + ratio)
+  # Compute information vector
+  I            <- 1/(sigma2[1]/n0 + sigma2[2]/(n0*ratio))
+  # Get operating characteristics when tau = 0
+  opchar_H0    <- opchar_int(0, e, fu, I, CovZ, n)
+  # Now get them for tau = delta
+  opchar_H1    <- opchar_int(delta, e, fu, I, CovZ, n)
+  opchar_H1
+}
+
+#========================================================================================================================================================
+
+#Function to compute ESS under delay
+
+ESS_delay=function(Delta, rho, sigma2, ratio, alpha, beta, delta1,recruitment,t_total,m0)
+{
+  optimal=opchar(Delta, rho, sigma2, ratio, alpha, beta, delta1)
+  
+  # Determining prob of terminating the trial at ith stage
+  J=length(rho)
+  e=optimal[(length(optimal)-2*J+1):(length(optimal)-J)]                        #efficacy boundaries
+  fu=optimal[(length(optimal)-J+1):length(optimal)]                             #futility boundaries
+  futility=optimal[(6+J):(6+2*J-1)]                                             #prob of futility stopping
+  efficacy=optimal[6:(6+J-1)]                                                   #prob of efficacy stopping
+  prob_termination=futility+efficacy                                            #prob of terminating the trial at stage j
+  n=optimal[(6+4*J):(6+5*J-1)]                                                  # vector of sample sizes at each stage for each arm
+  ESS=optimal[3]
+  
+  # Computing number of overruns who are not contributing to the interim
+  n_overrun=numeric(J)
+  t=numeric(J)
+  
+  
+  # 1. Uniform    
+  if(recruitment=="Uniform")
+  {
+    lamda=n[J]/t_total   #Maximum number of samples required/ total time of recruitment
+    n_overrun=c(rep(lamda*m0,J-1),0)
+  }
+  
+  
+  
+  # 2. Linear (Assuming a linear recruitment pattern of the form delta*t)
+  if(recruitment=="Linear")
+  {
+    delta=2*n[J]/(t_total*(t_total+1))
+    for(i in 1:(J-1))
+    {
+      t[i]=(-1+sqrt(1+4*2*n[i]/delta))/2
+      n_overrun[i]=delta*m0*t[i]+delta*m0*(m0+1)/2 
+    }
+    n_overrun[J]=0
+  }
+  
+  
+  for(i in 1:(J-1))
+  {
+    if(n_overrun[i]>=(n[J]-n[i]))
+      n_overrun[i]=n[J]-n[i]
+  }
+  
+  
+  #computing ESS delay 
+  a=numeric(J-1)
+  for(i in 1:J-1)
+    a[i]=prob_termination[i]*n_overrun[i]
+  
+  ess_delay= ESS+sum(a)
+  
+  n_single <- gsDesign::nNormal(delta1 = delta1, sd = 1, sd2 = 1, alpha , beta , ratio = 1)
+  EL <- (ess_delay-ESS)/(n_single-ESS)*100
+  
+  df <- c(J,t_total,m0,n_single,n[J],ESS, ess_delay,EL,n_overrun,e,fu)
+  names(df) <- c("Number of stages","Total recruitment period","Delay length",
+                 "N_single","Maximum sample size","ESS","ESS_delay","EL_Alt",
+                 paste("Number of overruns at stage", 1:J, sep = ""),
+                 paste("Efficacy ", 1:J, sep = ""),
+                 paste("Futility ", 1:J, sep = ""))
+  return(df)
+  
+}
+
+
+
+
+
+
+############################# Example parameters #######################################################
+
+Delta  <- 0.25                          
+rho    <- c(1/3, 2/3, 1)                
+sigma2 <- c(1, 1)                    
+ratio  <- 1
+alpha  <- 0.05
+beta   <- 0.1
+delta1  <- 0.5                      
+recruitment<- "Uniform"             
+t_total <-24                         
+m0      <-6                          
+
+
+ESS_delay(Delta,rho,sigma2,ratio,alpha,beta,delta1, recruitment,t_total,m0)
+
+###########################################################################################################
+
+
+
+
+
+
+
+
+
+
+
+
